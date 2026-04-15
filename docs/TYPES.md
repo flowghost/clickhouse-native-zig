@@ -1,10 +1,12 @@
 # Type Support Matrix
 
-Этот документ описывает текущее покрытие column types в Zig-пакете.
+[Русская версия](ru/TYPES.md)
 
-## 1. Готово Для Использования
+This document describes the current column type coverage in the Zig package.
 
-Эти типы уже проходят decode/encode roundtrip и могут использоваться в обычных `SELECT` / `INSERT` сценариях.
+## 1. Ready For Use
+
+These types already pass decode/encode roundtrip tests and can be used in normal `SELECT` / `INSERT` flows.
 
 ### String-like
 
@@ -50,7 +52,7 @@
 - `Tuple(...)`
 - `LowCardinality(T)`
 
-Эти composite-типы поддерживаются и в nested combinations, если внутренние типы тоже поддерживаются, например:
+Nested combinations are supported as long as the inner types are also supported, for example:
 
 - `Array(LowCardinality(String))`
 - `Map(LowCardinality(String), LowCardinality(String))`
@@ -59,17 +61,17 @@
 
 ## 2. API Semantics
 
-Есть две формы работы с типами:
+There are two practical ways to work with types:
 
 - typed/friendly API
 - wire-compatible raw API
 
 ### Typed / Friendly
 
-Самые удобные high-level builders/views сейчас есть для:
+The most convenient high-level builders/views currently exist for:
 
 - `String`
-- fixed-width family через `initOwnedFixedColumn(...)` и `asFixed()`
+- fixed-width types through `initOwnedFixedColumn(...)` and `asFixed()`
 - `Nullable`
 - `Array`
 - `Map`
@@ -78,7 +80,7 @@
 
 ### Wire-Compatible Raw
 
-Часть типов уже wire-compatible, но без отдельного специализированного Zig wrapper type. Они приходят как fixed-width или raw value representation:
+Some types are already wire-compatible but do not yet have a dedicated specialized Zig wrapper. They appear as fixed-width or raw value representations:
 
 - `Decimal*`
 - `UUID`
@@ -88,61 +90,61 @@
 - `Enum8`, `Enum16`
 - `Point`
 
-Для них можно использовать:
+For these you can use:
 
 - `column.asFixed()`
-- `ResultBinding` с sink `values`
+- `ResultBinding` with the `values` sink
 - manual interpretation of returned bytes
 
 ## 3. High-Level Binding
 
-`ResultBinding` поддерживает:
+`ResultBinding` supports:
 
 - primitive sinks: `strings`, `bytes`, `int8s`, `int64s`, `uint64s`, `bools`
 - recursive sink: `values`
 
-`values` materialize’ит строки результата в `OwnedValue`, поэтому подходит для:
+`values` materializes result rows into `OwnedValue`, so it works for:
 
 - `Nullable`
 - `Array`
 - `Map`
 - `Tuple`
 - `LowCardinality`
-- fixed-width unsupported-by-special-wrapper types
+- fixed-width types that do not have a specialized wrapper yet
 
 ## 4. Input Inference
 
-`Client.Do(...)` умеет доинферить input schema по zero-row metadata block, если client-side column был создан с пустым `name` и/или `type_name`.
+`Client.Do(...)` can infer input schema from a zero-row metadata block if the client-side column was created with an empty `name` and/or `type_name`.
 
-Это уже работает для:
+This already works for:
 
 - `String`
 - fixed-width columns
 - `encoded` composite builders
-- `Array`, `Map`, `Tuple`, `Nullable`, `LowCardinality`, если outer `type_name` был оставлен пустым
+- `Array`, `Map`, `Tuple`, `Nullable`, `LowCardinality` if the outer `type_name` was left empty
 
-## 5. Ещё Не Реализовано
+## 5. Not Implemented Yet
 
-Эти семейства пока не стоит считать поддержанными:
+These families should not be considered supported yet:
 
 - `SimpleAggregateFunction(...)`
 - `AggregateFunction(...)`
 - `Variant(...)`
 - `Dynamic`
-- параметризованный `JSON(...)`
+- parameterized `JSON(...)`
 - `Object(...)`
 - `QBit`
-- геометрические alias-типы вроде `Ring`, `Polygon`, `MultiPolygon`
+- geometry aliases such as `Ring`, `Polygon`, `MultiPolygon`
 
-Если в схеме используются именно они, текущий Zig-клиент пока не является полным drop-in parity с Go `proto`.
+If your schema uses these types, the current Zig client is not yet full drop-in parity with Go `proto`.
 
-## 6. Практическая Рекомендация
+## 6. Practical Recommendation
 
-Пакет уже подходит для интеграции, если твои таблицы в основном состоят из:
+The package is already suitable for integration if your tables mostly use:
 
-- чисел
-- строк
-- дат/времени
+- numbers
+- strings
+- date/time types
 - `UUID` / `IP`
 - `Decimal`
 - `Enum`
@@ -152,4 +154,4 @@
 - `Tuple`
 - `LowCardinality`
 
-Если в схеме есть `AggregateFunction` / `Variant` / `Dynamic` / `Object`, лучше сначала прогнать конкретную схему на тестовом стенде или добить поддержку этих типов отдельно.
+If your schema includes `AggregateFunction`, `Variant`, `Dynamic`, or `Object`, it is better to validate that schema on a staging environment first or finish support for those types separately.

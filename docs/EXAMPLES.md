@@ -1,6 +1,8 @@
 # Examples Guide
 
-Все примеры лежат в `zig/examples/` и собираются командой:
+[Русская версия](ru/EXAMPLES.md)
+
+All examples live in `zig/examples/` and can be built with:
 
 ```bash
 cd zig
@@ -11,21 +13,21 @@ zig build examples
 
 ### `smoke.zig`
 
-Минимальный import/build smoke test. Полезен, если нужно просто проверить, что пакет подтянулся как dependency.
+Minimal import/build smoke test. Useful when you only want to verify that the package is wired correctly as a dependency.
 
 ### `high_level_select.zig`
 
-Покрывает:
+Covers:
 
 - `Client.connectTcp`
 - `client.newQuery`
 - `client.Do`
 - `BlockBuffer`
-- `asFixed()` и чтение `String` result columns
+- `asFixed()` and reading `String` result columns
 
 ### `result_binding.zig`
 
-Покрывает:
+Covers:
 
 - `ResultBinding`
 - `ResultBindingColumn`
@@ -35,16 +37,16 @@ zig build examples
 
 ### `high_level_insert_stream.zig`
 
-Покрывает:
+Covers:
 
 - `Query.input`
 - `Query.on_input`
 - streaming `INSERT`
-- column builders `initOwnedFixedColumn` и `initOwnedStringColumn`
+- column builders `initOwnedFixedColumn` and `initOwnedStringColumn`
 
 ### `high_level_handlers.zig`
 
-Покрывает:
+Covers:
 
 - `on_result`
 - `on_totals`
@@ -57,7 +59,7 @@ zig build examples
 
 ### `observer.zig`
 
-Покрывает:
+Covers:
 
 - `ClientOptions.observer`
 - `ConnectObserveEvent`
@@ -66,16 +68,16 @@ zig build examples
 
 ### `cancel_query.zig`
 
-Покрывает:
+Covers:
 
 - `QueryContext`
-- cooperative cancellation через `is_canceled`
-- автоматический `Cancel` + закрытие соединения внутри `Do(...)`
+- cooperative cancellation through `is_canceled`
+- automatic `Cancel` + connection close inside `Do(...)`
 - `client.isClosed()`
 
 ### `columns.zig`
 
-Покрывает typed builders и views:
+Covers typed builders and views:
 
 - fixed-width
 - `Nullable`
@@ -84,45 +86,45 @@ zig build examples
 - `Tuple`
 - `LowCardinality`
 
-Это локальный пример без реального сервера.
+This is a local example and does not require a real server.
 
 ### `low_level_packets.zig`
 
-Покрывает raw packet-loop:
+Covers the raw packet loop:
 
 - `sendQuery`
 - `readServerPacket`
-- обработку `data/totals/extremes/progress/profile/end_of_stream`
+- handling `data/totals/extremes/progress/profile/end_of_stream`
 
 ### `pool.zig`
 
-Покрывает:
+Covers:
 
 - `Pool.init`
 - `pool.Do`
 - `pool.stat`
 
-Важно: runtime pool также поддерживает waiter path, replenishment `min_conns` и opportunistic health-check idle connections, хотя сам пример показывает только базовый happy path.
+Important: the runtime pool also supports waiter wakeups, `min_conns` replenishment, and opportunistic idle health checks, even though the example only shows the basic happy path.
 
 ### `tables_status.zig`
 
-Покрывает:
+Covers:
 
 - `requestTablesStatus`
 - `TablesStatusResponse`
 
 ### `ssh_auth.zig`
 
-Покрывает:
+Covers:
 
 - `ClientOptions.ssh_signer`
 - `SshSignFn`
 
-Важно: это wire-level пример формы callback. Для реального логина в callback нужно возвращать настоящую SSH signature.
+Important: this is only a wire-level shape of the callback. For real login, the callback must return a real SSH signature.
 
 ### `live_verify.zig`
 
-Полный e2e-прогон против живого ClickHouse:
+Full end-to-end run against a live ClickHouse server:
 
 - `ping`
 - `CREATE`
@@ -131,7 +133,7 @@ zig build examples
 - `DROP`
 - `disabled/none/lz4/lz4hc/zstd`
 
-Запуск:
+Run:
 
 ```bash
 cd zig
@@ -140,7 +142,7 @@ zig build run-live-verify -- 127.0.0.1 9000 backend deanon cryptovision
 
 ## Environment Variables
 
-Все сетевые примеры читают:
+All network examples read:
 
 - `CH_HOST`
 - `CH_PORT`
@@ -148,4 +150,4 @@ zig build run-live-verify -- 127.0.0.1 9000 backend deanon cryptovision
 - `CH_PASSWORD`
 - `CH_DATABASE`
 
-Если аргументы переданы в командной строке, они имеют приоритет над `CH_*`.
+If command-line arguments are passed, they take precedence over `CH_*`.

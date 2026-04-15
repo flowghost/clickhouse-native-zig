@@ -1,15 +1,15 @@
 # API Reference
 
-[Русская версия](ru/API.md)
+[English version](../API.md)
 
-Important:
+Важно:
 
-- the main verified deployment path is plain TCP
-- the current supported/unsupported type matrix is in [TYPES.md](TYPES.md)
+- основной проверенный deployment path сейчас plain TCP
+- актуальная матрица supported / unsupported column types лежит в [TYPES.md](TYPES.md)
 
 ## 1. Connection Lifecycle
 
-Main client type: `ch.Client`.
+Основной тип клиента: `ch.Client`.
 
 ```zig
 var client = try ch.Client.connectTcp(allocator, host, port, .{
@@ -22,7 +22,7 @@ var client = try ch.Client.connectTcp(allocator, host, port, .{
 defer client.deinit();
 ```
 
-`ClientOptions` supports:
+`ClientOptions` поддерживает:
 
 - `database`, `user`, `password`
 - `client_name`
@@ -35,9 +35,9 @@ defer client.deinit();
 - `tls`
 - `observer`
 
-If your consumer binary does not already link libc, add `exe.linkLibC();` in your `build.zig`, because the package vendors `lz4` and `zstd` C sources.
+Если consumer binary ещё не линкует libc, в своём `build.zig` нужно добавить `exe.linkLibC();`, потому что пакет вендорит `lz4` и `zstd` C sources.
 
-Lifecycle methods:
+Lifecycle методы:
 
 - `client.deinit()`
 - `client.close()`
@@ -47,7 +47,7 @@ Lifecycle methods:
 
 ## 2. High-Level Query API
 
-High-level orchestration is built around:
+High-level orchestration строится вокруг:
 
 - `QueryContext`
 - `Query`
@@ -56,7 +56,7 @@ High-level orchestration is built around:
 
 ### `QueryContext`
 
-`QueryContext` is passed into callbacks and supports cooperative cancellation:
+`QueryContext` передаётся во все callbacks и поддерживает cooperative cancellation:
 
 ```zig
 const ctx = ch.QueryContext{
@@ -65,7 +65,7 @@ const ctx = ch.QueryContext{
 };
 ```
 
-`is_canceled` signature:
+Сигнатура `is_canceled`:
 
 ```zig
 fn isCanceled(user_data: ?*anyopaque) bool
@@ -73,13 +73,13 @@ fn isCanceled(user_data: ?*anyopaque) bool
 
 ### `Query`
 
-Create a query with:
+`Query` создаётся через:
 
 ```zig
 var query = client.newQuery("SELECT 1");
 ```
 
-Supported high-level fields include:
+Поддерживаемые high-level поля:
 
 - `body`
 - `query_id`
@@ -114,7 +114,7 @@ Supported high-level fields include:
 
 ### `BlockBuffer`
 
-Use `BlockBuffer` when you want to keep decoded result blocks after packet lifetime ends:
+`BlockBuffer` нужен, когда нужно сохранить result blocks после завершения packet lifetime:
 
 ```zig
 var results = ch.BlockBuffer.init(allocator);
@@ -126,7 +126,7 @@ try client.Do(.{}, &query);
 
 ## 3. Result Routing
 
-`Client.Do(...)` routes packets as follows:
+`Client.Do(...)` маршрутизирует пакеты так:
 
 - `ServerCode.data` -> `query.result` / `query.on_result`
 - `ServerCode.totals` -> `query.totals` / `query.on_totals`
@@ -137,11 +137,11 @@ try client.Do(.{}, &query);
 - `ServerCode.profile_events` -> `query.on_profile_events`, `query.on_profile_events_batch`, `query.on_profile_event`
 - `ServerCode.table_columns` -> `query.on_table_columns`
 
-If the regular result stream contains more than one non-empty block and neither `result` nor `on_result` is set, the client returns `error.MissingResultHandler`.
+Если обычный result stream содержит больше одного non-empty block и не задан ни `result`, ни `on_result`, клиент возвращает `error.MissingResultHandler`.
 
 ## 4. Typed Result Binding
 
-For typed collection without manually walking `DecodedBlock`:
+Для typed result collection без ручного разбора `DecodedBlock`:
 
 ```zig
 var ids = std.ArrayList(u64).init(allocator);
@@ -158,7 +158,7 @@ var binding = ch.ResultBinding.init(allocator, columns[0..]);
 query.result_binding = &binding;
 ```
 
-Supported sink types:
+Поддерживаемые sink types:
 
 - `strings`
 - `bytes`
@@ -168,18 +168,18 @@ Supported sink types:
 - `bools`
 - `values`
 
-`values` uses `OwnedValues` and materializes rows recursively into `OwnedValue`:
+`values` использует `OwnedValues` и рекурсивно materialize’ит строки результата в `OwnedValue`:
 
-- `Nullable(...)` -> `OwnedValue.null` or inner value
+- `Nullable(...)` -> `OwnedValue.null` или inner value
 - `Array(...)` -> `OwnedValue.array`
 - `Map(...)` -> `OwnedValue.map`
 - `Tuple(...)` -> `OwnedValue.tuple`
-- `LowCardinality(...)` -> resolved dictionary value
-- fixed-width non-bool types -> `OwnedValue.fixed`
+- `LowCardinality(...)` -> фактическое dictionary value
+- fixed-width non-bool типы -> `OwnedValue.fixed`
 
-## 5. INSERT And Streaming Input
+## 5. INSERT И Streaming Input
 
-Single-block insert:
+Для single-block insert:
 
 ```zig
 var insert_query = client.newQuery("INSERT INTO t VALUES");
@@ -187,22 +187,22 @@ insert_query.input = columns[0..];
 try client.Do(.{}, &insert_query);
 ```
 
-Streaming insert:
+Для streaming insert:
 
 ```zig
 fn onInput(ctx: ch.QueryContext, query: *ch.Query) !void {
-    // populate query.input with the next batch
-    // return error.EndOfInput when the stream is finished
+    // заполнить query.input следующей пачкой
+    // вернуть error.EndOfInput, когда поток закончился
 }
 ```
 
-Notes:
+Особенности:
 
-- all input columns must contain the same row count
-- if `on_input` is set and initial `input` is empty, the callback is invoked before the first send
-- if the server sends a zero-row schema block first, `Do(...)` can infer missing `name` and `type_name`
-- this also works for composite builders if the outer `type_name` was left empty
-- on cancellation, `Do(...)` sends `Cancel` and closes the connection
+- все input columns должны содержать одинаковое число строк
+- если `on_input` задан и начальный `input` пустой, callback вызовется до первой отправки
+- если сервер сначала присылает zero-row schema block, `Do(...)` может доинферить пустые `name` и `type_name`
+- это работает и для composite builders, если outer `type_name` был оставлен пустым
+- при отмене `Do(...)` отправляет `Cancel` и закрывает соединение
 
 ## 6. Logs And Profile Events
 
@@ -213,7 +213,7 @@ High-level typed handlers:
 - `OnProfileEventsFn`: `fn (ctx, events: []const ProfileEvent) !void`
 - `OnProfileEventFn`: `fn (ctx, event: ProfileEvent) !void`
 
-Raw packet-level handlers are also available:
+Raw packet-level handlers тоже доступны:
 
 - `on_logs: ?OnDataPacketFn`
 - `on_profile_events: ?OnDataPacketFn`
@@ -228,7 +228,7 @@ Transport options:
 - `write_timeout_ms`
 - `handshake_timeout_ms`
 
-TLS example:
+Пример TLS:
 
 ```zig
 .tls = .{
@@ -238,7 +238,7 @@ TLS example:
 }
 ```
 
-`ca_mode` supports:
+`ca_mode` поддерживает:
 
 - `.system`
 - `.self_signed`
@@ -246,9 +246,9 @@ TLS example:
 
 ## 8. Observability
 
-Client and query both support `Observer`.
+И client, и query поддерживают `Observer`.
 
-Supported events:
+Поддерживаемые события:
 
 - `ConnectObserveEvent.start`
 - `ConnectObserveEvent.finish`
@@ -258,11 +258,11 @@ Supported events:
 - `QueryObserveEvent.exception`
 - `QueryObserveEvent.finish`
 
-`Query.metrics` stores the final `QueryMetrics`.
+`Query.metrics` сохраняет итоговый `QueryMetrics`.
 
 ## 9. Low-Level Protocol API
 
-If you want to run your own packet loop:
+Если нужен ручной packet loop:
 
 - `client.sendQuery(query)`
 - `client.sendDataPacket(packet)`
@@ -270,7 +270,7 @@ If you want to run your own packet loop:
 - `client.readServerPacket()`
 - `client.cancel()`
 
-`ServerPacket` includes:
+`ServerPacket` содержит:
 
 - `hello`
 - `data`
@@ -291,7 +291,7 @@ If you want to run your own packet loop:
 
 ## 10. Column Builders
 
-Available constructors:
+Доступные constructors:
 
 - `initOwnedStringColumn`
 - `initOwnedVarBytesColumn`
@@ -302,11 +302,11 @@ Available constructors:
 - `initTupleColumn`
 - `initLowCardinalityColumn`
 
-These can be used to build `Query.input` and `external_data` without manual serialization.
+Их можно использовать для `Query.input` и `external_data` без ручной сериализации.
 
 ## 11. Column Views
 
-Available accessors for decoded columns:
+Для декодированных columns доступны:
 
 - `column.asFixed()`
 - `column.asNullable(allocator)`
@@ -315,7 +315,7 @@ Available accessors for decoded columns:
 - `column.asTuple(allocator)`
 - `column.asLowCardinality(allocator)`
 
-Useful view types:
+Полезные view-типы:
 
 - `FixedColumnView`
 - `NullableColumnView`
@@ -326,15 +326,15 @@ Useful view types:
 
 ## 12. Supported Column Families
 
-In short:
+Кратко:
 
 - fully usable families: `String`, `JSON`, fixed-width numerics, `Bool`, `Enum8/16`, `Date/Date32`, `DateTime/DateTime64`, `Time32/Time64`, `Decimal*`, `UUID`, `IPv4/IPv6`, `Nullable`, `Array`, `Map`, `Tuple`, `LowCardinality`
-- raw-but-usable via `asFixed()` / `OwnedValue.fixed`: some special fixed-width types such as `Decimal`, `UUID`, `IP`, `DateTime*`
-- unsupported families are listed in [TYPES.md](TYPES.md)
+- raw-but-usable через `asFixed()` / `OwnedValue.fixed`: часть специальных fixed-width типов, например `Decimal`, `UUID`, `IP`, `DateTime*`
+- unsupported families перечислены в [TYPES.md](TYPES.md)
 
 ## 13. Pool
 
-Connection pool API:
+API пула соединений:
 
 - `Pool.init(...)`
 - `Pool.dial(...)`
@@ -343,7 +343,7 @@ Connection pool API:
 - `pool.ping()`
 - `pool.stat()`
 
-`PoolOptions` supports:
+`PoolOptions` поддерживает:
 
 - `host`, `port`
 - `client_options`
@@ -354,9 +354,9 @@ Connection pool API:
 
 Runtime semantics:
 
-- waiters in `acquire(...)` sleep on a condition variable instead of busy-looping
-- the pool replenishes `min_conns` automatically when a released connection is closed or expired
-- `health_check_period_ms` enables opportunistic idle `ping()` health checks
+- waiters в `acquire(...)` спят на condition variable, а не через busy-loop
+- pool автоматически replenishes `min_conns`, если released connection оказался closed или expired
+- `health_check_period_ms` включает opportunistic idle `ping()` health checks
 
 ## 14. Tables Status And SSH
 
@@ -365,7 +365,7 @@ Tables status:
 - `client.sendTablesStatusRequest(...)`
 - `client.requestTablesStatus(...)`
 
-Types:
+Типы:
 
 - `TablesStatusRequest`
 - `TablesStatusResponse`
@@ -379,9 +379,9 @@ SSH challenge flow:
 - `client.sendSshChallengeResponse(signature_b64)`
 - `client.authenticateSsh()`
 
-To enable automatic SSH auth during `connectTcp(...)`, pass `ClientOptions.ssh_signer`.
+Для автоматического SSH auth во время `connectTcp(...)` передай `ClientOptions.ssh_signer`.
 
-Signer callback signature:
+Сигнатура signer callback:
 
 ```zig
 pub const SshSignFn = *const fn (
@@ -391,11 +391,11 @@ pub const SshSignFn = *const fn (
 ) anyerror!void;
 ```
 
-`out` must receive raw signature bytes. The client performs base64 encoding itself.
+`out` должен получить raw signature bytes. Base64 encoding клиент делает сам.
 
 ## 15. Compression
 
-Supported wire codecs:
+Поддерживаемые wire codecs:
 
 - `.disabled`
 - `.none`
@@ -403,17 +403,17 @@ Supported wire codecs:
 - `.lz4hc`
 - `.zstd`
 
-Compression is configured through `ClientOptions.compression`.
+Compression настраивается через `ClientOptions.compression`.
 
-Both high-level `Do(...)` and low-level `sendQuery/readServerPacket` automatically coordinate:
+И high-level `Do(...)`, и low-level `sendQuery/readServerPacket` автоматически согласуют:
 
-- the query compression flag
+- query compression flag
 - `network_compression_method`
-- block framing and checksums
+- block framing и checksums
 
 ## 16. Error Model
 
-Common runtime errors:
+Основные runtime errors:
 
 - `error.ServerException`
 - `error.MissingResultHandler`
@@ -423,4 +423,4 @@ Common runtime errors:
 - `error.UnsupportedParameters`
 - `error.UnexpectedPacket`
 
-On `error.ServerException`, inspect details through `client.lastException()`.
+При `error.ServerException` подробности можно читать через `client.lastException()`.

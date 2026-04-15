@@ -1,40 +1,40 @@
 # clickhouse_native (Zig)
 
-[Русская версия](README.ru.md)
+[English version](README.md)
 
-Standalone Zig package for the ClickHouse native TCP protocol.
+Самостоятельный Zig-пакет для ClickHouse native TCP protocol.
 
-## What It Includes
+## Что Входит
 
 - high-level client API: `Client.Do(...)`, `Query`, `QueryContext`, `BlockBuffer`
 - typed result binding: `ResultBinding`, `ResultBindingColumn`, `OwnedByteSlices`, `OwnedValues`
 - low-level protocol API: `sendQuery`, `sendDataPacket`, `sendEndOfData`, `readServerPacket`
 - self-contained wire compression: `disabled`, `none`, `lz4`, `lz4hc`, `zstd`
-- typed column builders and views for `String`, fixed-width types, `Nullable`, `Array`, `Map`, `Tuple`, `LowCardinality`
+- typed column builders и views для `String`, fixed-width типов, `Nullable`, `Array`, `Map`, `Tuple`, `LowCardinality`
 - transport/runtime options: `dialer`, `dial_timeout_ms`, `read_timeout_ms`, `write_timeout_ms`, `handshake_timeout_ms`, `tls`
 - observability hooks: `Observer`, `QueryMetrics`
 - connection pool: `Pool`, `PooledClient`
-- support for `tables_status` and SSH challenge/response packets
+- support для `tables_status` и SSH challenge/response packets
 
-## Current Status
+## Текущий Статус
 
-The package is ready to use as a plain TCP ClickHouse client from another Zig project.
+Пакет уже можно использовать как plain TCP ClickHouse client из другого Zig-проекта.
 
-Verified today:
+На текущий момент подтверждено:
 
 - `Client.connectTcp(...)`, `ping()`, `Do(...)`, `Pool`
-- `INSERT` and `SELECT`
-- compression modes: `disabled`, `none`, `lz4`, `lz4hc`, `zstd`
+- `INSERT` и `SELECT`
+- режимы compression: `disabled`, `none`, `lz4`, `lz4hc`, `zstd`
 - high-level callbacks, result binding, schema-driven input inference
-- live end-to-end verification against a real ClickHouse server
+- live end-to-end проверка против реального ClickHouse
 
-Important limitations:
+Что важно учитывать:
 
-- TLS exists in the API, but the main verified deployment path is plain TCP
-- full support for every ClickHouse type is not finished yet
-- see the current type matrix in [docs/TYPES.md](docs/TYPES.md)
+- TLS есть в API, но основной проверенный deployment path сейчас plain TCP
+- полная поддержка всех типов ClickHouse ещё не завершена
+- актуальная матрица типов лежит в [docs/ru/TYPES.md](docs/ru/TYPES.md)
 
-## Quick Start
+## Быстрый Старт
 
 ```bash
 cd zig
@@ -42,16 +42,16 @@ zig build test
 zig build examples
 ```
 
-Live end-to-end verification against a real ClickHouse server:
+Live end-to-end проверка против реального ClickHouse:
 
 ```bash
 cd zig
 zig build run-live-verify -- 127.0.0.1 9000 backend deanon cryptovision
 ```
 
-## Using It As A Dependency
+## Подключение Как Зависимости
 
-In your project's `build.zig.zon`:
+В `build.zig.zon` внешнего проекта:
 
 ```zig
 .{
@@ -63,7 +63,7 @@ In your project's `build.zig.zon`:
 }
 ```
 
-In your `build.zig`:
+В `build.zig`:
 
 ```zig
 const clickhouse_native = b.dependency("clickhouse_native", .{
@@ -75,15 +75,15 @@ exe.root_module.addImport("clickhouse_native", clickhouse_native);
 exe.linkLibC();
 ```
 
-In code:
+В коде:
 
 ```zig
 const ch = @import("clickhouse_native");
 ```
 
-`linkLibC()` is required because the package vendors `lz4` and `zstd` C sources.
+`linkLibC()` нужен потому, что пакет вендорит `lz4` и `zstd` C sources.
 
-## Main Entry Points
+## Основные Entry Points
 
 - connect: `ch.Client.connectTcp(...)`
 - high-level queries: `client.newQuery(...)`, `client.Do(...)`
@@ -93,19 +93,19 @@ const ch = @import("clickhouse_native");
 - recursive result values: `ch.OwnedValues`, `ch.OwnedValue`
 - typed column access: `column.asFixed()`, `column.asNullable()`, `column.asArray()`, `column.asMap()`, `column.asTuple()`, `column.asLowCardinality()`
 - column builders: `initOwnedStringColumn`, `initOwnedFixedColumn`, `initNullableColumn`, `initArrayColumn`, `initMapColumn`, `initTupleColumn`, `initLowCardinalityColumn`
-- schema-driven input inference: `Do(...)` can fill empty `name` and `type_name` fields before `INSERT`
+- schema-driven input inference: `Do(...)` может заполнить пустые `name` и `type_name` перед `INSERT`
 - pooling: `ch.Pool.init(...)`, `pool.acquire(...)`, `pool.Do(...)`
 
-## Documentation
+## Документация
 
 - [API reference](docs/API.md)
 - [Examples guide](docs/EXAMPLES.md)
 - [Type support matrix](docs/TYPES.md)
-- [Russian API reference](docs/ru/API.md)
-- [Russian examples guide](docs/ru/EXAMPLES.md)
-- [Russian type support matrix](docs/ru/TYPES.md)
+- [Русский API reference](docs/ru/API.md)
+- [Русский examples guide](docs/ru/EXAMPLES.md)
+- [Русская матрица типов](docs/ru/TYPES.md)
 
-## Examples
+## Примеры
 
 - [high_level_select.zig](examples/high_level_select.zig)
 - [result_binding.zig](examples/result_binding.zig)
@@ -120,6 +120,6 @@ const ch = @import("clickhouse_native");
 - [ssh_auth.zig](examples/ssh_auth.zig)
 - [live_verify.zig](examples/live_verify.zig)
 
-## License
+## Лицензия
 
 Apache-2.0.
