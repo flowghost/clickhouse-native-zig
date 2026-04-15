@@ -98,7 +98,7 @@ fn verifyCompressionCase(
     defer deinitColumns(allocator, &columns);
     var insert_query = client.newQuery(insert_sql);
     insert_query.input = columns[0..];
-    try client.Do(.{}, &insert_query);
+    try runQuery(&client, &insert_query);
 
     const select_sql = try std.fmt.allocPrint(allocator, "SELECT id, name, tags, score, attrs, pair FROM {s} ORDER BY id", .{table});
     defer allocator.free(select_sql);
@@ -107,7 +107,7 @@ fn verifyCompressionCase(
     defer result_buffer.deinit();
     var select_query = client.newQuery(select_sql);
     select_query.result = &result_buffer;
-    try client.Do(.{}, &select_query);
+    try runQuery(&client, &select_query);
     try expectSelectRows(allocator, &result_buffer);
 
     std.debug.print("    final drop {s}\n", .{table});
@@ -122,7 +122,19 @@ const DrainMode = enum {
 
 fn execQuery(client: *ch.Client, sql: []const u8) !void {
     var query = client.newQuery(sql);
-    try client.Do(.{}, &query);
+    try runQuery(client, &query);
+}
+
+fn runQuery(client: *ch.Client, query: *ch.Query) !void {
+    client.Do(.{}, query) catch |err| {
+        if (client.lastException()) |exception| {
+            const stderr = std.io.getStdErr().writer();
+            for (exception.items) |item| {
+                stderr.print("      server exception {d} {s}: {s}\n", .{ item.code, item.name, item.message }) catch {};
+            }
+        }
+        return err;
+    };
 }
 
 fn drainUntilEnd(client: *ch.Client, mode: DrainMode) !void {

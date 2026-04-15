@@ -3177,7 +3177,11 @@ const InputSchemaWaiter = struct {
 
         self.mutex.lock();
         defer self.mutex.unlock();
-        if (self.ready or self.failed) return;
+        if (self.ready or self.failed) {
+            var tmp = clone;
+            tmp.deinit(self.allocator);
+            return;
+        }
         self.schema = clone;
         self.ready = true;
         self.cond.broadcast();
@@ -3233,6 +3237,12 @@ const DoRuntime = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         self.query_started = true;
+    }
+
+    fn queryStarted(self: *DoRuntime) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.query_started;
     }
 
     fn finishSender(self: *DoRuntime, err: ?anyerror) void {
@@ -3507,6 +3517,7 @@ pub const Client = struct {
 
     fn closeStream(self: *Client) void {
         if (self.stream_closed) return;
+        std.posix.shutdown(self.stream.handle, .both) catch {};
         self.stream.close();
         self.stream_closed = true;
     }
@@ -3604,13 +3615,25 @@ pub const Client = struct {
         const receive_thread = try std.Thread.spawn(.{}, runDoReceiveThread, .{&receive_state});
 
         var cancel_state = DoCancelThreadState{ .runtime = &runtime };
-        const cancel_thread = try std.Thread.spawn(.{}, runDoCancelThread, .{&cancel_state});
+        const cancel_thread = std.Thread.spawn(.{}, runDoCancelThread, .{&cancel_state}) catch |err| {
+            self.closeStream();
+            receive_thread.join();
+            final_err = err;
+            return err;
+        };
 
         var sender_err: ?anyerror = null;
         doSender(&runtime, prepared.wire) catch |err| {
             sender_err = err;
             if (input_waiter) |*waiter| waiter.fail(err);
         };
+        if (sender_err != null) {
+            if (runtime.queryStarted()) {
+                runtime.client.cancelAndCloseIgnoringErrors();
+            } else {
+                runtime.client.closeStream();
+            }
+        }
         runtime.finishSender(sender_err);
 
         receive_thread.join();
@@ -4008,8 +4031,8 @@ pub const Client = struct {
                     .data => .{ .data = try self.decodeDataPacketFromStream(&reader, arena_allocator, true) },
                     .totals => .{ .totals = try self.decodeDataPacketFromStream(&reader, arena_allocator, true) },
                     .extremes => .{ .extremes = try self.decodeDataPacketFromStream(&reader, arena_allocator, true) },
-                    .log => .{ .log = try DecodedDataPacket.decodePayloadFromStream(&reader, arena_allocator, self.protocol_version) },
-                    .profile_events => .{ .profile_events = try DecodedDataPacket.decodePayloadFromStream(&reader, arena_allocator, self.protocol_version) },
+                    .log => .{ .log = try self.decodeDataPacketFromStream(&reader, arena_allocator, true) },
+                    .profile_events => .{ .profile_events = try self.decodeDataPacketFromStream(&reader, arena_allocator, true) },
                     .exception => .{ .exception = try ExceptionChain.decodeFromStream(&reader, arena_allocator) },
                     .table_columns => .{ .table_columns = try TableColumns.decodePayloadFromStream(&reader, arena_allocator) },
                     .tables_status => .{ .tables_status = try TablesStatusResponse.decodePayloadFromStream(&reader, arena_allocator, self.protocol_version) },
@@ -4039,11 +4062,7 @@ pub const Client = struct {
         }
 
         if (compressible and self.active_query_compression == .enabled) {
-            const compressed_frame = try readCompressedFrameFromStream(reader, allocator);
-            const raw_block = try ch_compress.decompressFrame(allocator, compressed_frame);
-            var decoder = Decoder.init(raw_block);
-            packet.block = try DecodedBlock.decode(&decoder, allocator, self.protocol_version);
-            if (!decoder.eof()) return error.TrailingCompressedBlockData;
+            packet.block = try decodeAdaptiveDataBlockFromStream(reader, allocator, self.protocol_version);
             return packet;
         }
 
@@ -4314,7 +4333,11 @@ fn runDoReceiveThread(state: *DoReceiveThreadState) void {
         err = value;
     };
     if (runtime.input_waiter) |waiter| {
-        if (err) |value| waiter.fail(value);
+        if (err) |value| {
+            waiter.fail(value);
+        } else if (!waiter.isResolved()) {
+            waiter.fail(error.InputSchemaUnavailable);
+        }
     }
     runtime.finishReceiver(err);
 }
@@ -6017,6 +6040,160 @@ fn expectEmptyClientDataPacketFromStream(reader: *StreamReader, allocator: std.m
     if (!packet.block.isEnd()) return error.TestUnexpectedBlock;
 }
 
+const CaptureStreamState = struct {
+    reader: *StreamReader,
+    captured: std.ArrayList(u8),
+
+    fn init(allocator: std.mem.Allocator, reader: *StreamReader) CaptureStreamState {
+        return .{
+            .reader = reader,
+            .captured = std.ArrayList(u8).init(allocator),
+        };
+    }
+
+    fn deinit(self: *CaptureStreamState) void {
+        self.captured.deinit();
+    }
+};
+
+fn captureStreamReadAdapter(user_data: ?*anyopaque, buf: []u8) anyerror!usize {
+    const state: *CaptureStreamState = @ptrCast(@alignCast(user_data.?));
+    const n = try state.reader.readSome(buf);
+    try state.captured.appendSlice(buf[0..n]);
+    return n;
+}
+
+const ReplayStreamState = struct {
+    prefix: []const u8,
+    prefix_pos: usize = 0,
+    reader: *StreamReader,
+};
+
+fn replayStreamReadAdapter(user_data: ?*anyopaque, buf: []u8) anyerror!usize {
+    const state: *ReplayStreamState = @ptrCast(@alignCast(user_data.?));
+    if (state.prefix_pos < state.prefix.len) {
+        const remaining = state.prefix.len - state.prefix_pos;
+        const n = @min(remaining, buf.len);
+        @memcpy(buf[0..n], state.prefix[state.prefix_pos .. state.prefix_pos + n]);
+        state.prefix_pos += n;
+        return n;
+    }
+    return state.reader.readSome(buf);
+}
+
+fn decodeCompressedDataBlockFromStream(reader: *StreamReader, allocator: std.mem.Allocator, revision: u32) !DecodedBlock {
+    const compressed_frame = try readCompressedFrameFromStream(reader, allocator);
+    defer allocator.free(compressed_frame);
+    const raw_block = try ch_compress.decompressFrame(allocator, compressed_frame);
+    defer allocator.free(raw_block);
+    var decoder = Decoder.init(raw_block);
+    var block = try DecodedBlock.decode(&decoder, allocator, revision);
+    defer block.deinit(allocator);
+    if (!decoder.eof()) return error.TrailingCompressedBlockData;
+    return block.cloneOwned(allocator);
+}
+
+fn decodeAdaptiveDataBlockFromStream(reader: *StreamReader, allocator: std.mem.Allocator, revision: u32) !DecodedBlock {
+    var capture = CaptureStreamState.init(allocator, reader);
+    defer capture.deinit();
+
+    var capture_reader = StreamReader.initWithReader(&capture, captureStreamReadAdapter);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const plain_block = DecodedBlock.decodeFromStream(&capture_reader, arena.allocator(), revision) catch |plain_err| {
+        var replay = ReplayStreamState{
+            .prefix = capture.captured.items,
+            .reader = reader,
+        };
+        var replay_reader = StreamReader.initWithReader(&replay, replayStreamReadAdapter);
+        const block = decodeCompressedDataBlockFromStream(&replay_reader, allocator, revision) catch |compressed_err| switch (compressed_err) {
+            error.InvalidCompressedHeader,
+            error.CompressedDataTooLarge,
+            error.CorruptedCompressedData,
+            error.UnsupportedCompressionMethod,
+            error.Lz4DecompressionFailed,
+            error.ZstdDecompressionFailed,
+            error.TrailingCompressedBlockData,
+            => return plain_err,
+            else => return compressed_err,
+        };
+        return block;
+    };
+
+    if (capturedPacketLooksCompressed(capture.captured.items)) {
+        var replay = ReplayStreamState{
+            .prefix = capture.captured.items,
+            .reader = reader,
+        };
+        var replay_reader = StreamReader.initWithReader(&replay, replayStreamReadAdapter);
+        return try decodeCompressedDataBlockFromStream(&replay_reader, allocator, revision);
+    }
+
+    return plain_block.cloneOwned(allocator);
+}
+
+fn capturedPacketLooksCompressed(captured: []const u8) bool {
+    if (captured.len < ch_compress.header_size) return false;
+    _ = ch_compress.decodeFrameHeader(captured[0..ch_compress.header_size]) catch return false;
+    return true;
+}
+
+fn expectConnectionClosed(reader: *StreamReader) !void {
+    var buf: [1]u8 = undefined;
+    const n = reader.readSome(&buf) catch |err| switch (err) {
+        error.ConnectionResetByPeer,
+        error.BrokenPipe,
+        error.NotOpenForReading,
+        => return,
+        else => return err,
+    };
+    if (n != 0) return error.TestUnexpectedPacket;
+}
+
+fn compressionMethodSetting(block_compression: BlockCompression) ?[]const u8 {
+    return switch (block_compression) {
+        .disabled => null,
+        .none => "NONE",
+        .lz4 => "LZ4",
+        .lz4hc => "LZ4HC",
+        .zstd => "ZSTD",
+    };
+}
+
+fn writeMockServerDataPacket(stream: std.net.Stream, allocator: std.mem.Allocator, revision: u32, code: ServerCode, block: DataBlock, compression: BlockCompression) !void {
+    var encoder = Encoder.init(allocator);
+    defer encoder.deinit();
+    try code.encode(&encoder);
+    if (Feature.temp_tables.enabled(revision)) {
+        try encoder.putString("");
+    }
+
+    if (compression == .disabled) {
+        try block.encode(&encoder, revision);
+    } else {
+        var block_encoder = Encoder.init(allocator);
+        defer block_encoder.deinit();
+        try block.encode(&block_encoder, revision);
+        const compressed = try ch_compress.compressFrame(
+            allocator,
+            block_encoder.bytes(),
+            switch (compression) {
+                .disabled => unreachable,
+                .none => .none,
+                .lz4 => .lz4,
+                .lz4hc => .lz4hc,
+                .zstd => .zstd,
+            },
+            0,
+        );
+        defer allocator.free(compressed);
+        try encoder.putRaw(compressed);
+    }
+
+    try stream.writeAll(encoder.bytes());
+}
+
 const MockServerState = struct {
     err: ?anyerror = null,
     saw_hello: bool = false,
@@ -6066,6 +6243,8 @@ const SshHandshakeMockServerState = struct {
 
 const DoSelectMockServerState = struct {
     err: ?anyerror = null,
+    compression: BlockCompression = .disabled,
+    server_compression: ?BlockCompression = null,
     saw_hello: bool = false,
     saw_query: bool = false,
 };
@@ -6095,6 +6274,19 @@ const DoCancelMockServerState = struct {
 };
 
 const DoExceptionMockServerState = struct {
+    err: ?anyerror = null,
+    saw_hello: bool = false,
+    saw_query: bool = false,
+};
+
+const DoSenderFailureMockServerState = struct {
+    err: ?anyerror = null,
+    saw_hello: bool = false,
+    saw_query: bool = false,
+    saw_disconnect: bool = false,
+};
+
+const DoInferMissingSchemaMockServerState = struct {
     err: ?anyerror = null,
     saw_hello: bool = false,
     saw_query: bool = false,
@@ -6174,6 +6366,18 @@ fn runDoCancelMockServer(server: *std.net.Server, state: *DoCancelMockServerStat
 
 fn runDoExceptionMockServer(server: *std.net.Server, state: *DoExceptionMockServerState) void {
     runDoExceptionMockServerImpl(server, state) catch |err| {
+        state.err = err;
+    };
+}
+
+fn runDoSenderFailureMockServer(server: *std.net.Server, state: *DoSenderFailureMockServerState) void {
+    runDoSenderFailureMockServerImpl(server, state) catch |err| {
+        state.err = err;
+    };
+}
+
+fn runDoInferMissingSchemaMockServer(server: *std.net.Server, state: *DoInferMissingSchemaMockServerState) void {
+    runDoInferMissingSchemaMockServerImpl(server, state) catch |err| {
         state.err = err;
     };
 }
@@ -6589,8 +6793,14 @@ fn runDoSelectMockServerImpl(server: *std.net.Server, state: *DoSelectMockServer
     var query = try Query.decodePacketFromStream(&reader, arena.allocator(), default_protocol_version);
     defer query.deinit(arena.allocator());
     if (!std.mem.eql(u8, query.body, "SELECT name, count FROM t")) return error.TestUnexpectedQuery;
+    if (compressionMethodSetting(state.compression)) |expected_method| {
+        if (query.compression != .enabled) return error.TestUnexpectedCompression;
+        const actual_method = findSettingValue(query.settings, "network_compression_method") orelse return error.TestMissingCompressionSetting;
+        if (!std.mem.eql(u8, actual_method, expected_method)) return error.TestUnexpectedCompressionSetting;
+    }
     state.saw_query = true;
-    try expectEmptyClientDataPacketFromStream(&reader, arena.allocator(), default_protocol_version, false);
+    try expectEmptyClientDataPacketFromStream(&reader, arena.allocator(), default_protocol_version, state.compression != .disabled);
+    const server_compression = state.server_compression orelse state.compression;
 
     encoder.clearRetainingCapacity();
     try (Progress{
@@ -6615,33 +6825,21 @@ fn runDoSelectMockServerImpl(server: *std.net.Server, state: *DoSelectMockServer
         .{ .uint64 = .{ .name = "count", .values = &counts } },
     };
 
-    encoder.clearRetainingCapacity();
-    try ServerCode.data.encode(&encoder);
-    if (Feature.temp_tables.enabled(default_protocol_version)) {
-        try encoder.putString("");
-    }
-    try (DataBlock{
+    try writeMockServerDataPacket(conn.stream, std.heap.page_allocator, default_protocol_version, .data, .{
         .info = .{ .bucket_num = -1 },
         .columns = &columns,
         .rows = 2,
-    }).encode(&encoder, default_protocol_version);
-    try conn.stream.writeAll(encoder.bytes());
+    }, server_compression);
 
     const total_counts = [_]u64{53};
     const total_columns = [_]Column{
         .{ .uint64 = .{ .name = "total_count", .values = &total_counts } },
     };
-    encoder.clearRetainingCapacity();
-    try ServerCode.totals.encode(&encoder);
-    if (Feature.temp_tables.enabled(default_protocol_version)) {
-        try encoder.putString("");
-    }
-    try (DataBlock{
+    try writeMockServerDataPacket(conn.stream, std.heap.page_allocator, default_protocol_version, .totals, .{
         .info = .{ .bucket_num = -1 },
         .columns = &total_columns,
         .rows = 1,
-    }).encode(&encoder, default_protocol_version);
-    try conn.stream.writeAll(encoder.bytes());
+    }, server_compression);
 
     const extreme_min = [_]u64{11};
     const extreme_max = [_]u64{42};
@@ -6649,17 +6847,11 @@ fn runDoSelectMockServerImpl(server: *std.net.Server, state: *DoSelectMockServer
         .{ .uint64 = .{ .name = "min_count", .values = &extreme_min } },
         .{ .uint64 = .{ .name = "max_count", .values = &extreme_max } },
     };
-    encoder.clearRetainingCapacity();
-    try ServerCode.extremes.encode(&encoder);
-    if (Feature.temp_tables.enabled(default_protocol_version)) {
-        try encoder.putString("");
-    }
-    try (DataBlock{
+    try writeMockServerDataPacket(conn.stream, std.heap.page_allocator, default_protocol_version, .extremes, .{
         .info = .{ .bucket_num = -1 },
         .columns = &extreme_columns,
         .rows = 1,
-    }).encode(&encoder, default_protocol_version);
-    try conn.stream.writeAll(encoder.bytes());
+    }, server_compression);
 
     const log_times = [_]u32{123};
     const log_micros = [_]u32{456789};
@@ -6685,17 +6877,11 @@ fn runDoSelectMockServerImpl(server: *std.net.Server, state: *DoSelectMockServer
             column.deinit(std.heap.page_allocator);
         }
     }
-    encoder.clearRetainingCapacity();
-    try ServerCode.log.encode(&encoder);
-    if (Feature.temp_tables.enabled(default_protocol_version)) {
-        try encoder.putString("");
-    }
-    try (DataBlock{
+    try writeMockServerDataPacket(conn.stream, std.heap.page_allocator, default_protocol_version, .log, .{
         .info = .{ .bucket_num = -1 },
         .columns = &log_columns,
         .rows = 1,
-    }).encode(&encoder, default_protocol_version);
-    try conn.stream.writeAll(encoder.bytes());
+    }, server_compression);
 
     const event_times = [_]u32{222};
     const event_hosts = [_][]const u8{"host-b"};
@@ -6717,17 +6903,11 @@ fn runDoSelectMockServerImpl(server: *std.net.Server, state: *DoSelectMockServer
             column.deinit(std.heap.page_allocator);
         }
     }
-    encoder.clearRetainingCapacity();
-    try ServerCode.profile_events.encode(&encoder);
-    if (Feature.temp_tables.enabled(default_protocol_version)) {
-        try encoder.putString("");
-    }
-    try (DataBlock{
+    try writeMockServerDataPacket(conn.stream, std.heap.page_allocator, default_protocol_version, .profile_events, .{
         .info = .{ .bucket_num = -1 },
         .columns = &profile_event_columns,
         .rows = 1,
-    }).encode(&encoder, default_protocol_version);
-    try conn.stream.writeAll(encoder.bytes());
+    }, server_compression);
 
     encoder.clearRetainingCapacity();
     try ServerCode.end_of_stream.encode(&encoder);
@@ -6963,6 +7143,94 @@ fn runDoExceptionMockServerImpl(server: *std.net.Server, state: *DoExceptionMock
         .stack = "stack",
         .nested = false,
     }).encodePacket(&encoder);
+    try conn.stream.writeAll(encoder.bytes());
+}
+
+fn runDoSenderFailureMockServerImpl(server: *std.net.Server, state: *DoSenderFailureMockServerState) !void {
+    const conn = try server.accept();
+    defer conn.stream.close();
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+
+    var reader = StreamReader.init(conn.stream);
+    _ = try ClientHello.decodePacketFromStream(&reader, arena.allocator());
+    state.saw_hello = true;
+
+    var encoder = Encoder.init(std.heap.page_allocator);
+    defer encoder.deinit();
+
+    try (ServerHello{
+        .name = "ClickHouse server",
+        .major = 24,
+        .minor = 1,
+        .revision = default_protocol_version,
+        .timezone = "UTC",
+        .display_name = "mock",
+        .patch = 1,
+    }).encodePacket(&encoder, default_protocol_version);
+    try conn.stream.writeAll(encoder.bytes());
+
+    if (Feature.quota_key.enabled(default_protocol_version)) {
+        _ = try reader.readStringAlloc(arena.allocator());
+    }
+
+    var query = try Query.decodePacketFromStream(&reader, arena.allocator(), default_protocol_version);
+    defer query.deinit(arena.allocator());
+    if (!std.mem.eql(u8, query.body, "INSERT INTO t VALUES")) return error.TestUnexpectedQuery;
+    state.saw_query = true;
+    try expectEmptyClientDataPacketFromStream(&reader, arena.allocator(), default_protocol_version, false);
+    const next_code = readClientCodeFromStream(&reader) catch |err| switch (err) {
+        error.UnexpectedEof,
+        error.ConnectionResetByPeer,
+        => {
+            state.saw_disconnect = true;
+            return;
+        },
+        else => return err,
+    };
+    if (next_code != .cancel) return error.TestUnexpectedPacket;
+    try expectConnectionClosed(&reader);
+    state.saw_disconnect = true;
+}
+
+fn runDoInferMissingSchemaMockServerImpl(server: *std.net.Server, state: *DoInferMissingSchemaMockServerState) !void {
+    const conn = try server.accept();
+    defer conn.stream.close();
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+
+    var reader = StreamReader.init(conn.stream);
+    _ = try ClientHello.decodePacketFromStream(&reader, arena.allocator());
+    state.saw_hello = true;
+
+    var encoder = Encoder.init(std.heap.page_allocator);
+    defer encoder.deinit();
+
+    try (ServerHello{
+        .name = "ClickHouse server",
+        .major = 24,
+        .minor = 1,
+        .revision = default_protocol_version,
+        .timezone = "UTC",
+        .display_name = "mock",
+        .patch = 1,
+    }).encodePacket(&encoder, default_protocol_version);
+    try conn.stream.writeAll(encoder.bytes());
+
+    if (Feature.quota_key.enabled(default_protocol_version)) {
+        _ = try reader.readStringAlloc(arena.allocator());
+    }
+
+    var query = try Query.decodePacketFromStream(&reader, arena.allocator(), default_protocol_version);
+    defer query.deinit(arena.allocator());
+    if (!std.mem.eql(u8, query.body, "INSERT INTO t VALUES")) return error.TestUnexpectedQuery;
+    state.saw_query = true;
+    try expectEmptyClientDataPacketFromStream(&reader, arena.allocator(), default_protocol_version, false);
+
+    encoder.clearRetainingCapacity();
+    try ServerCode.end_of_stream.encode(&encoder);
     try conn.stream.writeAll(encoder.bytes());
 }
 
@@ -7321,6 +7589,12 @@ fn onStreamingInput(ctx: QueryContext, query: *Query) !void {
         },
         else => return error.EndOfInput,
     }
+}
+
+fn onFailingInput(ctx: QueryContext, query: *Query) !void {
+    _ = ctx;
+    _ = query;
+    return error.TestInputFailure;
 }
 
 const ObserverState = struct {
@@ -8450,6 +8724,73 @@ test "client Do routes results totals logs profile and profile events" {
     }
 }
 
+test "client Do routes compressed results logs and profile events" {
+    const address = try std.net.Address.parseIp("127.0.0.1", 0);
+    var server = try address.listen(.{ .reuse_address = true });
+    defer server.deinit();
+
+    var state = DoSelectMockServerState{
+        .compression = .lz4,
+    };
+    const thread = try std.Thread.spawn(.{}, runDoSelectMockServer, .{ &server, &state });
+
+    var client = try Client.connectTcp(std.testing.allocator, "127.0.0.1", server.listen_address.getPort(), .{
+        .client_name = "zig-test",
+        .compression = .lz4,
+    });
+    defer client.deinit();
+
+    var callbacks = DoResultState{};
+    var query = client.newQuery("SELECT name, count FROM t");
+    query.on_logs_batch = onDoLogsBatch;
+    query.on_log = onDoLog;
+    query.on_profile_events_batch = onDoProfileEventsBatch;
+    query.on_profile_event = onDoProfileEvent;
+
+    try client.Do(.{ .user_data = &callbacks }, &query);
+    thread.join();
+
+    if (state.err) |err| return err;
+    try std.testing.expect(state.saw_hello);
+    try std.testing.expect(state.saw_query);
+    try std.testing.expectEqual(@as(usize, 1), callbacks.log_batch_calls);
+    try std.testing.expectEqual(@as(usize, 1), callbacks.log_calls);
+    try std.testing.expectEqual(@as(usize, 1), callbacks.profile_events_batch_calls);
+    try std.testing.expectEqual(@as(usize, 1), callbacks.profile_event_calls);
+}
+
+test "client Do handles none compression when server sends plain data packets" {
+    const address = try std.net.Address.parseIp("127.0.0.1", 0);
+    var server = try address.listen(.{ .reuse_address = true });
+    defer server.deinit();
+
+    var state = DoSelectMockServerState{
+        .compression = .none,
+        .server_compression = .disabled,
+    };
+    const thread = try std.Thread.spawn(.{}, runDoSelectMockServer, .{ &server, &state });
+
+    var client = try Client.connectTcp(std.testing.allocator, "127.0.0.1", server.listen_address.getPort(), .{
+        .client_name = "zig-test",
+        .compression = .none,
+    });
+    defer client.deinit();
+
+    var result_buffer = BlockBuffer.init(std.testing.allocator);
+    defer result_buffer.deinit();
+    var query = client.newQuery("SELECT name, count FROM t");
+    query.result = &result_buffer;
+
+    try client.Do(.{}, &query);
+    thread.join();
+
+    if (state.err) |err| return err;
+    try std.testing.expect(state.saw_hello);
+    try std.testing.expect(state.saw_query);
+    try std.testing.expectEqual(@as(usize, 1), result_buffer.blocks.items.len);
+    try std.testing.expectEqual(@as(usize, 2), result_buffer.blocks.items[0].rows);
+}
+
 test "client Do streams input via OnInput" {
     const address = try std.net.Address.parseIp("127.0.0.1", 0);
     var server = try address.listen(.{ .reuse_address = true });
@@ -8513,6 +8854,67 @@ test "client Do sends cancel and closes client on context cancellation" {
     try std.testing.expect(state.saw_query);
     try std.testing.expect(state.saw_cancel);
     try std.testing.expectEqual(@as(usize, 1), cancel_state.progress_calls);
+    try std.testing.expect(client.isClosed());
+}
+
+test "client Do closes transport when sender fails locally" {
+    const address = try std.net.Address.parseIp("127.0.0.1", 0);
+    var server = try address.listen(.{ .reuse_address = true });
+    defer server.deinit();
+
+    var state = DoSenderFailureMockServerState{};
+    const thread = try std.Thread.spawn(.{}, runDoSenderFailureMockServer, .{ &server, &state });
+
+    var client = try Client.connectTcp(std.testing.allocator, "127.0.0.1", server.listen_address.getPort(), .{
+        .client_name = "zig-test",
+    });
+    defer client.deinit();
+
+    var query = client.newQuery("INSERT INTO t VALUES");
+    query.input = &.{};
+    query.on_input = onFailingInput;
+
+    try std.testing.expectError(error.TestInputFailure, client.Do(.{}, &query));
+    thread.join();
+
+    if (state.err) |err| return err;
+    try std.testing.expect(state.saw_hello);
+    try std.testing.expect(state.saw_query);
+    try std.testing.expect(state.saw_disconnect);
+    try std.testing.expect(client.isClosed());
+}
+
+test "client Do fails input inference when server finishes without schema" {
+    const address = try std.net.Address.parseIp("127.0.0.1", 0);
+    var server = try address.listen(.{ .reuse_address = true });
+    defer server.deinit();
+
+    var state = DoInferMissingSchemaMockServerState{};
+    const thread = try std.Thread.spawn(.{}, runDoInferMissingSchemaMockServer, .{ &server, &state });
+
+    var client = try Client.connectTcp(std.testing.allocator, "127.0.0.1", server.listen_address.getPort(), .{
+        .client_name = "zig-test",
+    });
+    defer client.deinit();
+
+    const values = [_][]const u8{ "a", "b" };
+    const columns = [_]Column{
+        .{ .var_bytes = .{
+            .name = "",
+            .type_name = "",
+            .values = &values,
+        } },
+    };
+
+    var query = client.newQuery("INSERT INTO t VALUES");
+    query.input = &columns;
+
+    try std.testing.expectError(error.InputSchemaUnavailable, client.Do(.{}, &query));
+    thread.join();
+
+    if (state.err) |err| return err;
+    try std.testing.expect(state.saw_hello);
+    try std.testing.expect(state.saw_query);
     try std.testing.expect(client.isClosed());
 }
 
