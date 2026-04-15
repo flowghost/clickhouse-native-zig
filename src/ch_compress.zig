@@ -193,7 +193,7 @@ fn decompressZstd(allocator: std.mem.Allocator, payload: []const u8, data_size: 
 
 fn ensureZstdSuccess(code: usize, failure: anyerror) !void {
     if (ZSTD_isError(code) != 0) {
-        _ = ZSTD_getErrorName(code);
+        std.log.err("zstd error: {s}", .{std.mem.span(ZSTD_getErrorName(code))});
         return failure;
     }
 }
@@ -380,8 +380,6 @@ fn ch128Seed(input: []const u8, seed: U128) U128 {
 
     var consumed: usize = 0;
     while (consumed < s.len) : (consumed += 32) {
-        const chunk = @min(consumed + 32, s.len);
-        _ = chunk;
         const i = consumed + 32;
         y = rot64(y -% x, 42) *% k0 +% v.high;
         w.low +%= std.mem.readInt(u64, tail[tail.len - i + 16 ..][0..8], .little);

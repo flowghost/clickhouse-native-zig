@@ -27,7 +27,7 @@ fn onInput(ctx: ch.QueryContext, query: *ch.Query) !void {
             state.stage = 2;
         },
         else => {
-            query.input = &.{};
+            query.input = ch.empty_mutable_columns;
             return error.EndOfInput;
         },
     }

@@ -4,6 +4,10 @@ const ch_compress = @import("ch_compress.zig");
 
 pub const default_protocol_version: u32 = 54460;
 pub const default_client_name = "clickhouse/native-zig";
+pub const max_string_size: usize = 256 * 1024 * 1024;
+
+const max_fixture_size: usize = 64 * 1024 * 1024;
+pub const empty_mutable_columns: []Column = @constCast(&[_]Column{});
 
 pub const Feature = enum(u32) {
     block_info = 51903,
@@ -284,8 +288,9 @@ pub const Decoder = struct {
 
     pub fn readString(self: *Decoder) ![]const u8 {
         const len = try self.readVarUInt();
-        if (len > std.math.maxInt(usize)) return error.LengthOverflow;
-        return self.readSlice(@as(usize, @intCast(len)));
+        const usize_len = try castVarUInt(usize, len);
+        if (usize_len > max_string_size) return error.StringTooLarge;
+        return self.readSlice(usize_len);
     }
 
     pub fn readInt32LE(self: *Decoder) !i32 {
@@ -379,6 +384,7 @@ pub const StreamReader = struct {
     pub fn readStringAlloc(self: *StreamReader, allocator: std.mem.Allocator) ![]u8 {
         const len = try self.readVarUInt();
         const usize_len = try castVarUInt(usize, len);
+        if (usize_len > max_string_size) return error.StringTooLarge;
         const out = try allocator.alloc(u8, usize_len);
         errdefer allocator.free(out);
         try self.readExact(out);
@@ -1606,7 +1612,7 @@ pub const Query = struct {
     info: ClientInfo,
     settings: []Setting = &.{},
     parameters: []Parameter = &.{},
-    input: []const Column = &.{},
+    input: []Column = empty_mutable_columns,
     on_input: ?OnInputFn = null,
     result: ?*BlockBuffer = null,
     result_binding: ?*ResultBinding = null,
@@ -2402,6 +2408,7 @@ pub const Column = union(enum) {
         return switch (self) {
             .string => |column| blk: {
                 var cloned = try initOwnedStringColumn(allocator, column.name, column.values);
+                errdefer cloned.deinit(allocator);
                 switch (cloned) {
                     .string => |*value| {
                         value.name = try allocator.dupe(u8, column.name);
@@ -2413,6 +2420,7 @@ pub const Column = union(enum) {
             },
             .var_bytes => |column| blk: {
                 var cloned = try initOwnedVarBytesColumn(allocator, column.name, column.type_name, column.values);
+                errdefer cloned.deinit(allocator);
                 switch (cloned) {
                     .var_bytes => |*value| {
                         value.name = try allocator.dupe(u8, column.name);
@@ -2424,45 +2432,81 @@ pub const Column = union(enum) {
                 }
                 break :blk cloned;
             },
-            .fixed_bytes => |column| .{ .fixed_bytes = .{
-                .name = try allocator.dupe(u8, column.name),
-                .type_name = try allocator.dupe(u8, column.type_name),
-                .width = column.width,
-                .data = try allocator.dupe(u8, column.data),
-                .rows = column.rowCount(),
-                .owns_name = true,
-                .owns_type_name = true,
-                .owns_data = true,
-            } },
-            .encoded => |column| .{ .encoded = .{
-                .name = try allocator.dupe(u8, column.name),
-                .type_name = try allocator.dupe(u8, column.type_name),
-                .rows = column.rows,
-                .state = try allocator.dupe(u8, column.state),
-                .payload = try allocator.dupe(u8, column.payload),
-                .owns_name = true,
-                .owns_type_name = true,
-                .owns_state = true,
-                .owns_payload = true,
-            } },
-            .int8 => |column| .{ .int8 = .{
-                .name = try allocator.dupe(u8, column.name),
-                .values = try allocator.dupe(i8, column.values),
-                .owns_name = true,
-                .owns_values = true,
-            } },
-            .int64 => |column| .{ .int64 = .{
-                .name = try allocator.dupe(u8, column.name),
-                .values = try allocator.dupe(i64, column.values),
-                .owns_name = true,
-                .owns_values = true,
-            } },
-            .uint64 => |column| .{ .uint64 = .{
-                .name = try allocator.dupe(u8, column.name),
-                .values = try allocator.dupe(u64, column.values),
-                .owns_name = true,
-                .owns_values = true,
-            } },
+            .fixed_bytes => |column| blk: {
+                const name_copy = try allocator.dupe(u8, column.name);
+                errdefer allocator.free(name_copy);
+                const type_name_copy = try allocator.dupe(u8, column.type_name);
+                errdefer allocator.free(type_name_copy);
+                const data_copy = try allocator.dupe(u8, column.data);
+                errdefer allocator.free(data_copy);
+                break :blk .{ .fixed_bytes = .{
+                    .name = name_copy,
+                    .type_name = type_name_copy,
+                    .width = column.width,
+                    .data = data_copy,
+                    .rows = column.rowCount(),
+                    .owns_name = true,
+                    .owns_type_name = true,
+                    .owns_data = true,
+                } };
+            },
+            .encoded => |column| blk: {
+                const name_copy = try allocator.dupe(u8, column.name);
+                errdefer allocator.free(name_copy);
+                const type_name_copy = try allocator.dupe(u8, column.type_name);
+                errdefer allocator.free(type_name_copy);
+                const state_copy = try allocator.dupe(u8, column.state);
+                errdefer allocator.free(state_copy);
+                const payload_copy = try allocator.dupe(u8, column.payload);
+                errdefer allocator.free(payload_copy);
+                break :blk .{ .encoded = .{
+                    .name = name_copy,
+                    .type_name = type_name_copy,
+                    .rows = column.rows,
+                    .state = state_copy,
+                    .payload = payload_copy,
+                    .owns_name = true,
+                    .owns_type_name = true,
+                    .owns_state = true,
+                    .owns_payload = true,
+                } };
+            },
+            .int8 => |column| blk: {
+                const name_copy = try allocator.dupe(u8, column.name);
+                errdefer allocator.free(name_copy);
+                const values_copy = try allocator.dupe(i8, column.values);
+                errdefer allocator.free(values_copy);
+                break :blk .{ .int8 = .{
+                    .name = name_copy,
+                    .values = values_copy,
+                    .owns_name = true,
+                    .owns_values = true,
+                } };
+            },
+            .int64 => |column| blk: {
+                const name_copy = try allocator.dupe(u8, column.name);
+                errdefer allocator.free(name_copy);
+                const values_copy = try allocator.dupe(i64, column.values);
+                errdefer allocator.free(values_copy);
+                break :blk .{ .int64 = .{
+                    .name = name_copy,
+                    .values = values_copy,
+                    .owns_name = true,
+                    .owns_values = true,
+                } };
+            },
+            .uint64 => |column| blk: {
+                const name_copy = try allocator.dupe(u8, column.name);
+                errdefer allocator.free(name_copy);
+                const values_copy = try allocator.dupe(u64, column.values);
+                errdefer allocator.free(values_copy);
+                break :blk .{ .uint64 = .{
+                    .name = name_copy,
+                    .values = values_copy,
+                    .owns_name = true,
+                    .owns_values = true,
+                } };
+            },
         };
     }
 };
@@ -3144,7 +3188,7 @@ const PreparedQuery = struct {
     }
 };
 
-const cancel_poll_interval_ns: u64 = 5 * std.time.ns_per_ms;
+const cancel_wait_interval_ns: u64 = 50 * std.time.ns_per_ms;
 
 const InputSchemaWaiter = struct {
     allocator: std.mem.Allocator,
@@ -3202,12 +3246,28 @@ const InputSchemaWaiter = struct {
         return self.ready or self.failed;
     }
 
-    fn wait(self: *InputSchemaWaiter) !DecodedBlock {
+    fn wait(self: *InputSchemaWaiter, timeout_ms: u64) !DecodedBlock {
         self.mutex.lock();
         defer self.mutex.unlock();
 
+        const timeout_ns = std.math.mul(u64, timeout_ms, std.time.ns_per_ms) catch std.math.maxInt(u64);
+        const start_ns = if (timeout_ms > 0) std.time.nanoTimestamp() else 0;
         while (!self.ready and !self.failed) {
-            self.cond.wait(&self.mutex);
+            if (timeout_ms == 0) {
+                self.cond.wait(&self.mutex);
+                continue;
+            }
+
+            const elapsed_ns_i128 = std.time.nanoTimestamp() - start_ns;
+            const elapsed_ns: u64 = if (elapsed_ns_i128 <= 0)
+                0
+            else
+                @intCast(@min(@as(i128, @intCast(timeout_ns)), elapsed_ns_i128));
+            if (elapsed_ns >= timeout_ns) return error.InputSchemaTimeout;
+            self.cond.timedWait(&self.mutex, timeout_ns - elapsed_ns) catch |err| switch (err) {
+                error.Timeout => return error.InputSchemaTimeout,
+                else => return err,
+            };
         }
         if (self.failed) return self.err orelse error.InputInferenceFailed;
         const schema = self.schema.?;
@@ -3224,6 +3284,7 @@ const DoRuntime = struct {
     metrics: *QueryMetrics,
     observer: ?Observer = null,
     mutex: std.Thread.Mutex = .{},
+    cond: std.Thread.Condition = .{},
     query_started: bool = false,
     sender_done: bool = false,
     receiver_done: bool = false,
@@ -3237,6 +3298,7 @@ const DoRuntime = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         self.query_started = true;
+        self.cond.broadcast();
     }
 
     fn queryStarted(self: *DoRuntime) bool {
@@ -3253,6 +3315,7 @@ const DoRuntime = struct {
         if (err != null or self.receiver_done) {
             self.done = true;
         }
+        self.cond.broadcast();
     }
 
     fn finishReceiver(self: *DoRuntime, err: ?anyerror) void {
@@ -3266,11 +3329,10 @@ const DoRuntime = struct {
         } else if (self.sender_done) {
             self.done = true;
         }
+        self.cond.broadcast();
     }
 
-    fn shouldCancel(self: *DoRuntime) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+    fn shouldCancelLocked(self: *DoRuntime) bool {
         if (self.cancel_sent or self.done or self.got_exception or !self.query_started) return false;
         if (!self.ctx.canceled()) return false;
         self.cancel_sent = true;
@@ -3298,6 +3360,8 @@ pub const Client = struct {
     stream_closed: bool,
     tls_client: ?*std.crypto.tls.Client,
     tls_ca_bundle: ?std.crypto.Certificate.Bundle,
+    pending_read_prefix: []u8,
+    pending_read_prefix_pos: usize,
     protocol_version: u32,
     hello: ClientHello,
     server: ServerHello,
@@ -3391,6 +3455,8 @@ pub const Client = struct {
             .stream_closed = false,
             .tls_client = null,
             .tls_ca_bundle = null,
+            .pending_read_prefix = &.{},
+            .pending_read_prefix_pos = 0,
             .protocol_version = options.protocol_version,
             .hello = .{
                 .name = options.client_name,
@@ -3493,6 +3559,7 @@ pub const Client = struct {
     pub fn deinit(self: *Client) void {
         self.closeStream();
         self.deinitTlsTransport();
+        self.clearPendingReadPrefix();
         self.server_storage.deinit();
         self.last_exception_storage.deinit();
         if (self.owned_hello_user.len > 0) self.allocator.free(self.owned_hello_user);
@@ -3520,6 +3587,30 @@ pub const Client = struct {
         std.posix.shutdown(self.stream.handle, .both) catch {};
         self.stream.close();
         self.stream_closed = true;
+    }
+
+    fn clearPendingReadPrefix(self: *Client) void {
+        if (self.pending_read_prefix.len > 0) self.allocator.free(self.pending_read_prefix);
+        self.pending_read_prefix = &.{};
+        self.pending_read_prefix_pos = 0;
+    }
+
+    fn prependReadPrefix(self: *Client, bytes: []const u8) !void {
+        if (bytes.len == 0) return;
+
+        const existing = if (self.pending_read_prefix_pos < self.pending_read_prefix.len)
+            self.pending_read_prefix[self.pending_read_prefix_pos..]
+        else
+            &.{};
+        const combined = try self.allocator.alloc(u8, bytes.len + existing.len);
+        errdefer self.allocator.free(combined);
+        @memcpy(combined[0..bytes.len], bytes);
+        if (existing.len > 0) {
+            @memcpy(combined[bytes.len..], existing);
+        }
+        self.clearPendingReadPrefix();
+        self.pending_read_prefix = combined;
+        self.pending_read_prefix_pos = 0;
     }
 
     fn clearLastException(self: *Client) void {
@@ -3728,15 +3819,15 @@ pub const Client = struct {
         if (runtime.query.external_data.len > 0) {
             runtime.metrics.blocks_sent += 1;
         }
+        var schema_storage: ?DecodedBlock = null;
+        defer if (schema_storage) |*schema| schema.deinit(runtime.client.allocator);
         if (runtime.input_waiter) |waiter| {
-            var schema = try waiter.wait();
-            defer schema.deinit(runtime.client.allocator);
-            try inferInputColumns(runtime.client.allocator, runtime.query, &schema);
+            schema_storage = try waiter.wait(runtime.client.read_timeout_ms);
         }
-        try runtime.client.sendInput(runtime.query, runtime.ctx, runtime.metrics);
+        try runtime.client.sendInput(runtime.query, runtime.ctx, runtime.metrics, if (schema_storage) |*schema| schema else null);
     }
 
-    fn sendInput(self: *Client, query: *Query, ctx: QueryContext, metrics: *QueryMetrics) !void {
+    fn sendInput(self: *Client, query: *Query, ctx: QueryContext, metrics: *QueryMetrics, schema: ?*const DecodedBlock) !void {
         if (query.input.len == 0 and query.on_input == null) return;
 
         if (query.on_input != null and try inputRowCount(query.input) == 0) {
@@ -3747,6 +3838,9 @@ pub const Client = struct {
 
         while (true) {
             try ctx.check();
+            if (schema) |value| {
+                try maybePrepareInferredInput(self.allocator, query, value);
+            }
 
             const rows = try inputRowCount(query.input);
             if (rows > 0) {
@@ -4062,7 +4156,7 @@ pub const Client = struct {
         }
 
         if (compressible and self.active_query_compression == .enabled) {
-            packet.block = try decodeAdaptiveDataBlockFromStream(reader, allocator, self.protocol_version);
+            packet.block = try decodeAdaptiveDataBlockFromStream(self, reader, allocator, self.protocol_version);
             return packet;
         }
 
@@ -4189,6 +4283,16 @@ pub const Client = struct {
     }
 
     fn transportRead(self: *Client, buffer: []u8) !usize {
+        if (self.pending_read_prefix_pos < self.pending_read_prefix.len) {
+            const remaining = self.pending_read_prefix.len - self.pending_read_prefix_pos;
+            const n = @min(remaining, buffer.len);
+            @memcpy(buffer[0..n], self.pending_read_prefix[self.pending_read_prefix_pos .. self.pending_read_prefix_pos + n]);
+            self.pending_read_prefix_pos += n;
+            if (self.pending_read_prefix_pos == self.pending_read_prefix.len) {
+                self.clearPendingReadPrefix();
+            }
+            return n;
+        }
         if (self.tls_client) |tls_client| {
             return tls_client.read(self.stream, buffer);
         }
@@ -4345,12 +4449,19 @@ fn runDoReceiveThread(state: *DoReceiveThreadState) void {
 fn runDoCancelThread(state: *DoCancelThreadState) void {
     const runtime = state.runtime;
     while (true) {
-        if (runtime.isDone()) return;
-        if (runtime.shouldCancel()) {
-            runtime.client.cancelAndCloseIgnoringErrors();
-            return;
+        runtime.mutex.lock();
+        while (true) {
+            if (runtime.done) {
+                runtime.mutex.unlock();
+                return;
+            }
+            if (runtime.shouldCancelLocked()) {
+                runtime.mutex.unlock();
+                runtime.client.cancelAndCloseIgnoringErrors();
+                return;
+            }
+            runtime.cond.timedWait(&runtime.mutex, cancel_wait_interval_ns) catch {};
         }
-        std.time.sleep(cancel_poll_interval_ns);
     }
 }
 
@@ -4397,8 +4508,7 @@ fn columnNeedsInference(column: Column) bool {
     };
 }
 
-fn inferInputColumns(allocator: std.mem.Allocator, query: *Query, schema: *const DecodedBlock) !void {
-    const input_columns = @constCast(query.input);
+fn inferInputColumns(allocator: std.mem.Allocator, input_columns: []Column, schema: *const DecodedBlock) !void {
     for (input_columns, 0..) |*input_column, idx| {
         const schema_column = if (input_column.name().len != 0)
             findSchemaColumnByName(schema, input_column.name()) orelse return error.MissingInputSchemaColumn
@@ -4409,6 +4519,11 @@ fn inferInputColumns(allocator: std.mem.Allocator, query: *Query, schema: *const
 
         try inferInputColumn(allocator, input_column, schema_column);
     }
+}
+
+fn maybePrepareInferredInput(allocator: std.mem.Allocator, query: *Query, schema: *const DecodedBlock) !void {
+    if (!queryNeedsInputInference(query.*)) return;
+    try inferInputColumns(allocator, query.input, schema);
 }
 
 fn findSchemaColumnByName(schema: *const DecodedBlock, name: []const u8) ?Column {
@@ -5068,8 +5183,10 @@ fn copyRawFromStream(reader: *StreamReader, encoder: *Encoder, len: usize) !void
 
 fn copyStringFromStream(reader: *StreamReader, encoder: *Encoder) !void {
     const len = try reader.readVarUInt();
+    const usize_len = try castVarUInt(usize, len);
+    if (usize_len > max_string_size) return error.StringTooLarge;
     try encoder.putVarUInt(len);
-    try copyRawFromStream(reader, encoder, try castVarUInt(usize, len));
+    try copyRawFromStream(reader, encoder, usize_len);
 }
 
 fn buildOwnedStringLikeColumn(allocator: std.mem.Allocator, name: []const u8, type_name: []const u8, values: []const []const u8, is_var_bytes: bool) !Column {
@@ -5843,6 +5960,18 @@ pub const Pool = struct {
     }
 
     fn reapExpiredLocked(self: *Pool, now: i128) void {
+        var expired_count: usize = 0;
+        for (self.entries.items) |entry| {
+            if (entry.in_use) continue;
+            if (!self.entryExpired(entry, now) and !entry.client.isClosed()) continue;
+            expired_count += 1;
+        }
+        if (expired_count == 0) return;
+
+        const expired = self.allocator.alloc(*PoolEntry, expired_count) catch return;
+        defer self.allocator.free(expired);
+
+        var removed: usize = 0;
         var idx: usize = 0;
         while (idx < self.entries.items.len) {
             const entry = self.entries.items[idx];
@@ -5855,10 +5984,17 @@ pub const Pool = struct {
                 continue;
             }
 
-            _ = self.entries.swapRemove(idx);
-            self.mutex.unlock();
-            self.destroyEntry(entry);
+            expired[removed] = self.entries.swapRemove(idx);
+            removed += 1;
+        }
+
+        self.mutex.unlock();
+        defer {
             self.mutex.lock();
+            self.cond.broadcast();
+        }
+        for (expired[0..removed]) |entry| {
+            self.destroyEntry(entry);
         }
     }
 
@@ -5996,7 +6132,7 @@ fn indexOfPoolEntry(entries: []const *PoolEntry, target: *PoolEntry) ?usize {
 const pool_wait_interval_ns: u64 = 10 * std.time.ns_per_ms;
 
 fn readFixture(allocator: std.mem.Allocator, relative_path: []const u8) ![]u8 {
-    return try std.fs.cwd().readFileAlloc(allocator, relative_path, std.math.maxInt(usize));
+    return try std.fs.cwd().readFileAlloc(allocator, relative_path, max_fixture_size);
 }
 
 fn readCompressedFrameFromStream(reader: *StreamReader, allocator: std.mem.Allocator) ![]u8 {
@@ -6067,6 +6203,10 @@ const ReplayStreamState = struct {
     prefix: []const u8,
     prefix_pos: usize = 0,
     reader: *StreamReader,
+
+    fn remainingPrefix(self: ReplayStreamState) []const u8 {
+        return self.prefix[self.prefix_pos..];
+    }
 };
 
 fn replayStreamReadAdapter(user_data: ?*anyopaque, buf: []u8) anyerror!usize {
@@ -6093,7 +6233,7 @@ fn decodeCompressedDataBlockFromStream(reader: *StreamReader, allocator: std.mem
     return block.cloneOwned(allocator);
 }
 
-fn decodeAdaptiveDataBlockFromStream(reader: *StreamReader, allocator: std.mem.Allocator, revision: u32) !DecodedBlock {
+fn decodeAdaptiveDataBlockFromStream(client: *Client, reader: *StreamReader, allocator: std.mem.Allocator, revision: u32) !DecodedBlock {
     var capture = CaptureStreamState.init(allocator, reader);
     defer capture.deinit();
 
@@ -6118,6 +6258,7 @@ fn decodeAdaptiveDataBlockFromStream(reader: *StreamReader, allocator: std.mem.A
             => return plain_err,
             else => return compressed_err,
         };
+        try client.prependReadPrefix(replay.remainingPrefix());
         return block;
     };
 
@@ -6127,7 +6268,9 @@ fn decodeAdaptiveDataBlockFromStream(reader: *StreamReader, allocator: std.mem.A
             .reader = reader,
         };
         var replay_reader = StreamReader.initWithReader(&replay, replayStreamReadAdapter);
-        return try decodeCompressedDataBlockFromStream(&replay_reader, allocator, revision);
+        const block = try decodeCompressedDataBlockFromStream(&replay_reader, allocator, revision);
+        try client.prependReadPrefix(replay.remainingPrefix());
+        return block;
     }
 
     return plain_block.cloneOwned(allocator);
@@ -6547,7 +6690,7 @@ fn runCompressedSelectMockServerImpl(server: *std.net.Server, state: *Compressed
 
     const names = [_][]const u8{ "alpha", "beta" };
     const counts = [_]u64{ 11, 42 };
-    const columns = [_]Column{
+    var columns = [_]Column{
         .{ .string = .{ .name = "name", .values = &names } },
         .{ .uint64 = .{ .name = "count", .values = &counts } },
     };
@@ -6820,7 +6963,7 @@ fn runDoSelectMockServerImpl(server: *std.net.Server, state: *DoSelectMockServer
 
     const names = [_][]const u8{ "alpha", "beta" };
     const counts = [_]u64{ 11, 42 };
-    const columns = [_]Column{
+    var columns = [_]Column{
         .{ .string = .{ .name = "name", .values = &names } },
         .{ .uint64 = .{ .name = "count", .values = &counts } },
     };
@@ -7413,6 +7556,8 @@ fn makeClientForSettings(allocator: std.mem.Allocator, compression: BlockCompres
         .stream_closed = false,
         .tls_client = null,
         .tls_ca_bundle = null,
+        .pending_read_prefix = &.{},
+        .pending_read_prefix_pos = 0,
         .protocol_version = default_protocol_version,
         .hello = undefined,
         .server = undefined,
@@ -7439,6 +7584,20 @@ fn makeClientForSettings(allocator: std.mem.Allocator, compression: BlockCompres
         .last_exception_storage = std.heap.ArenaAllocator.init(allocator),
         .last_exception = null,
     };
+}
+
+const SliceReaderState = struct {
+    bytes: []const u8,
+    pos: usize = 0,
+};
+
+fn sliceReaderReadAdapter(user_data: ?*anyopaque, buf: []u8) anyerror!usize {
+    const state: *SliceReaderState = @ptrCast(@alignCast(user_data.?));
+    if (state.pos >= state.bytes.len) return 0;
+    const n = @min(buf.len, state.bytes.len - state.pos);
+    @memcpy(buf[0..n], state.bytes[state.pos .. state.pos + n]);
+    state.pos += n;
+    return n;
 }
 
 const DoResultState = struct {
@@ -7583,7 +7742,7 @@ fn onStreamingInput(ctx: QueryContext, query: *Query) !void {
             state.stage = 1;
         },
         1 => {
-            query.input = &.{};
+            query.input = empty_mutable_columns;
             state.stage = 2;
             return error.EndOfInput;
         },
@@ -8360,6 +8519,27 @@ test "effective query settings keep explicit compression method" {
     try std.testing.expect(settings == null);
 }
 
+test "decoder and stream reader reject oversized strings" {
+    var encoder = Encoder.init(std.testing.allocator);
+    defer encoder.deinit();
+    try encoder.putVarUInt(max_string_size + 1);
+    try encoder.putByte(0);
+
+    var decoder = Decoder.init(encoder.bytes());
+    try std.testing.expectError(error.StringTooLarge, decoder.readString());
+
+    var state = SliceReaderState{ .bytes = encoder.bytes() };
+    var reader = StreamReader.initWithReader(&state, sliceReaderReadAdapter);
+    try std.testing.expectError(error.StringTooLarge, reader.readStringAlloc(std.testing.allocator));
+}
+
+test "input schema waiter times out" {
+    var waiter = InputSchemaWaiter.init(std.testing.allocator);
+    defer waiter.deinit();
+
+    try std.testing.expectError(error.InputSchemaTimeout, waiter.wait(10));
+}
+
 test "zero-row stateful block keeps headers only" {
     var golden = Encoder.init(std.testing.allocator);
     defer golden.deinit();
@@ -8812,7 +8992,7 @@ test "client Do streams input via OnInput" {
     };
 
     var query = client.newQuery("INSERT INTO t VALUES");
-    query.input = &.{};
+    query.input = empty_mutable_columns;
     query.on_input = onStreamingInput;
 
     try client.Do(.{ .user_data = &input_state }, &query);
@@ -8871,7 +9051,7 @@ test "client Do closes transport when sender fails locally" {
     defer client.deinit();
 
     var query = client.newQuery("INSERT INTO t VALUES");
-    query.input = &.{};
+    query.input = empty_mutable_columns;
     query.on_input = onFailingInput;
 
     try std.testing.expectError(error.TestInputFailure, client.Do(.{}, &query));
@@ -8898,7 +9078,7 @@ test "client Do fails input inference when server finishes without schema" {
     defer client.deinit();
 
     const values = [_][]const u8{ "a", "b" };
-    const columns = [_]Column{
+    var columns = [_]Column{
         .{ .var_bytes = .{
             .name = "",
             .type_name = "",
@@ -8907,7 +9087,7 @@ test "client Do fails input inference when server finishes without schema" {
     };
 
     var query = client.newQuery("INSERT INTO t VALUES");
-    query.input = &columns;
+    query.input = columns[0..];
 
     try std.testing.expectError(error.InputSchemaUnavailable, client.Do(.{}, &query));
     thread.join();

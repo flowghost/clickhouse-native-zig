@@ -85,7 +85,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_tests.step);
 
     const examples_step = b.step("examples", "Build all Zig examples");
-    const example_step = b.step("example", "Build all Zig examples");
+    const example_step = b.step("example", "Alias for `zig build examples`");
     for (examples) |entry| {
         const exe = b.addExecutable(.{
             .name = entry.name,
@@ -96,7 +96,6 @@ pub fn build(b: *std.Build) void {
         });
         exe.root_module.addImport("clickhouse_native", module);
         examples_step.dependOn(&exe.step);
-        example_step.dependOn(&exe.step);
     }
 
     const live_verify = b.addExecutable(.{
@@ -107,6 +106,8 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     live_verify.root_module.addImport("clickhouse_native", module);
+    examples_step.dependOn(&live_verify.step);
+    example_step.dependOn(examples_step);
 
     const run_live_verify = b.addRunArtifact(live_verify);
     if (b.args) |args| {
