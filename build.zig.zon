@@ -1,0 +1,17 @@
+.{
+    .name = .clickhouse_native,
+    .version = "0.1.0",
+    .fingerprint = 0x52d97caa999bb79e,
+    .minimum_zig_version = "0.14.1",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "compress",
+        "docs",
+        "examples",
+        "proto",
+        "src",
+        "vendor",
+    },
+}
